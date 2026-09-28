@@ -1,28 +1,118 @@
+
 """LLM abstraction layer using OpenRouter."""
+
+import logging
+
 import httpx
 from app.core.config import settings
 
+logger = logging.getLogger(__name__)
+
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 SYSTEM_PROMPTS = {
-    "beginner": """You are QubitAI, an expert quantum computing tutor for beginners.
-Explain concepts using simple analogies (coins, light switches, balls in boxes).
-Avoid heavy math. Focus on intuition. Keep answers concise (3-5 sentences max unless asked for more).
-If asked about quantum gates, use visual analogies.""",
+    "beginner": """You are QubitAI, the AI quantum computing tutor for QuantumVerse.
 
-    "intermediate": """You are QubitAI, a quantum computing tutor for intermediate learners.
-You can use linear algebra, Dirac notation (|0⟩, |1⟩), and Bloch sphere descriptions.
-Explain the math but keep it accessible. Connect theory to real circuit implementations.""",
+Your job is to answer a broad range of questions about quantum computing,
+quantum physics, quantum algorithms, quantum circuits, and related topics.
 
-    "advanced": """You are QubitAI, an expert quantum computing mentor for advanced students.
-Use full mathematical formalism: density matrices, tensor products, unitary operators, Hamiltonians.
-Discuss quantum complexity theory, error correction, and NISQ-era limitations when relevant.""",
+TEACHING STYLE:
+- Explain concepts in simple, accessible language.
+- Use analogies, practical examples, and step-by-step explanations.
+- Avoid unnecessary mathematical notation.
+- Introduce technical terms and explain what they mean.
+- Keep answers concise but complete. Expand when the user asks for detail.
+
+TOPICS YOU CAN EXPLAIN:
+- Qubits, superposition, measurement, and entanglement.
+- Quantum gates, circuits, and quantum states.
+- Quantum algorithms, including Grover's and Shor's algorithms.
+- Quantum hardware, error correction, and applications.
+- Classical versus quantum computing.
+- Quantum programming frameworks and learning exercises.
+
+BEHAVIOR:
+- Answer the user's actual question directly.
+- Do not restrict answers to the lessons stored in the application.
+- Handle follow-up questions using the conversation history.
+- If a question is outside quantum computing, answer it if you can,
+  while explaining any relevant connection to quantum computing.
+- If you are uncertain, say so rather than inventing facts.
+- Correct misconceptions politely.
+- Never claim that quantum computers solve every problem faster.
+- Use examples whenever they help understanding.
+- Use proper quantum notation when useful, but explain it simply.
+""",
+
+    "intermediate": """You are QubitAI, an expert quantum computing tutor
+for intermediate learners on QuantumVerse.
+
+Answer a broad range of questions about quantum computing, quantum physics,
+quantum information, algorithms, circuits, hardware, and applications.
+
+Use linear algebra, complex amplitudes, Dirac notation, matrices, and
+Bloch sphere representations when useful.
+
+Explain mathematical steps and connect theoretical concepts to circuit
+implementations and practical examples.
+
+Cover topics including quantum gates, entanglement, measurement,
+interference, Grover's algorithm, Shor's algorithm, quantum error correction,
+quantum complexity, and quantum programming.
+
+Answer the actual question, not just questions matching a predefined list.
+Use conversation history to understand follow-up questions.
+Do not limit explanations to the application's stored lessons.
+
+Be accurate about quantum speedups and hardware limitations.
+Distinguish established results from active research.
+If uncertain, state the uncertainty instead of fabricating information.
+Adapt the depth and length to the user's request.
+""",
+
+    "advanced": """You are QubitAI, an expert quantum computing mentor
+for advanced learners on QuantumVerse.
+
+Provide technically rigorous explanations across quantum information,
+quantum mechanics, quantum algorithms, quantum complexity, quantum hardware,
+and quantum error correction.
+
+Use Dirac notation, Hilbert spaces, density matrices, tensor products,
+unitary operators, Hamiltonians, and mathematical derivations where relevant.
+
+Discuss topics such as BQP, quantum circuit complexity, Shor's algorithm,
+Grover's algorithm, fault-tolerant computation, stabilizer codes,
+variational algorithms, and NISQ-era limitations.
+
+Answer open-ended questions and follow-ups using the conversation history.
+Do not restrict answers to the application's lesson database or a fixed
+set of predefined questions.
+
+Distinguish proven results, assumptions, approximations, and active research.
+Do not invent citations, experimental results, or mathematical claims.
+If a question is ambiguous, state your interpretation or ask for clarification.
+
+Adapt the level of mathematical detail to the user's request.
+""",
 }
 
-FALLBACK_RESPONSES = {
-    "beginner": "Quantum computing uses the weird rules of quantum physics — like superposition (being in two states at once) and entanglement (spooky action at a distance) — to perform certain calculations exponentially faster than classical computers.",
-    "intermediate": "Quantum computing leverages quantum mechanical phenomena — superposition, entanglement, and interference — to encode and process information in qubits, enabling polynomial or exponential speedups for specific problem classes.",
-    "advanced": "Quantum computing exploits the exponentially large Hilbert space of n-qubit systems and quantum mechanical operations (unitary evolution, projective measurement) to solve certain computational problems in BQP that are believed classically intractable.",
-}
+
+def _fallback_response(message: str, difficulty: str) -> str:
+    """Return a transparent response when the AI provider is unavailable."""
+
+    logger.warning(
+        "Returning fallback response. AI provider is unavailable. "
+        "Difficulty=%s, message_length=%d",
+        difficulty,
+        len(message),
+    )
+
+    return (
+        "I'm temporarily unable to reach the AI model, so I can't generate "
+        "a proper answer to your question right now. Please try again shortly. "
+        "If this continues, the AI service configuration or provider "
+        "availability needs to be checked."
+    )
 
 
 async def get_ai_response(
@@ -31,48 +121,175 @@ async def get_ai_response(
     difficulty: str = "beginner",
     context: dict | None = None,
 ) -> str:
-    if not settings.OPENROUTER_API_KEY or settings.OPENROUTER_API_KEY == "your-openrouter-key-here":
+    """
+    Generate an AI response using OpenRouter.
+
+    Logs provider errors without exposing the API key.
+    Falls back gracefully if the provider is unavailable.
+    """
+
+    api_key = settings.OPENROUTER_API_KEY
+    model = settings.AI_MODEL
+
+    # Check whether the API key is configured.
+    if (
+        not api_key
+        or api_key.strip() == ""
+        or api_key == "your-openrouter-key-here"
+    ):
+        logger.error(
+            "OPENROUTER_API_KEY is missing or contains the default "
+            "placeholder. Check the Render environment variables."
+        )
         return _fallback_response(message, difficulty)
 
-    system = SYSTEM_PROMPTS.get(difficulty, SYSTEM_PROMPTS["beginner"])
+    if not model or not model.strip():
+        logger.error(
+            "AI_MODEL is missing or empty. Check the Render environment."
+        )
+        return _fallback_response(message, difficulty)
+
+    # Select the system prompt for the requested difficulty.
+    system = SYSTEM_PROMPTS.get(
+        difficulty.lower(),
+        SYSTEM_PROMPTS["beginner"],
+    )
+
+    # Add relevant application context, if supplied.
     if context:
-        system += f"\n\nCurrent context: {context}"
+        system += (
+            "\n\nAdditional learning context from the application:\n"
+            f"{context}\n"
+            "Use this context when relevant, but do not treat it as "
+            "a restriction on which questions you can answer."
+        )
 
     messages = [{"role": "system", "content": system}]
-    messages.extend(history[-8:])  # last 8 messages for context
-    messages.append({"role": "user", "content": message})
+
+    # Include recent conversation history.
+    # Only accept valid user/assistant messages.
+    valid_history = []
+
+    for item in history[-10:]:
+        role = item.get("role")
+        content = item.get("content")
+
+        if role in ("user", "assistant") and isinstance(content, str):
+            if content.strip():
+                valid_history.append(
+                    {
+                        "role": role,
+                        "content": content,
+                    }
+                )
+
+    messages.extend(valid_history)
+
+    # Append the current user message.
+    messages.append(
+        {
+            "role": "user",
+            "content": message,
+        }
+    )
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": settings.APP_URL,
+        "X-Title": settings.APP_NAME,
+    }
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": 1200,
+        "temperature": 0.7,
+    }
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {settings.OPENROUTER_API_KEY}",
-                    "HTTP-Referer": "https://quantumverse.ai",
-                    "X-Title": "QuantumVerse AI",
-                },
-                json={
-                    "model": settings.AI_MODEL,
-                    "messages": messages,
-                    "max_tokens": 800,
-                    "temperature": 0.7,
-                },
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                OPENROUTER_URL,
+                headers=headers,
+                json=payload,
             )
-            resp.raise_for_status()
-            data = resp.json()
-            return data["choices"][0]["message"]["content"].strip()
-    except Exception as exc:
+
+            # Raise for HTTP errors so the status and response
+            # body can be recorded in the logs.
+            response.raise_for_status()
+
+            data = response.json()
+
+            choices = data.get("choices", [])
+
+            if not choices:
+                logger.error(
+                    "OpenRouter returned no choices. Model=%s, response=%s",
+                    model,
+                    str(data)[:1000],
+                )
+                return _fallback_response(message, difficulty)
+
+            assistant_message = choices[0].get("message", {})
+            content = assistant_message.get("content")
+
+            if isinstance(content, str) and content.strip():
+                logger.info(
+                    "OpenRouter response successful. Model=%s",
+                    model,
+                )
+                return content.strip()
+
+            logger.error(
+                "OpenRouter returned an empty or invalid message. "
+                "Model=%s, response=%s",
+                model,
+                str(data)[:1000],
+            )
+
+            return _fallback_response(message, difficulty)
+
+    except httpx.HTTPStatusError as exc:
+        # Log the HTTP status and provider error body.
+        # Never log request headers or the API key.
+        logger.error(
+            "OpenRouter HTTP error. Status=%s, Model=%s, Body=%s",
+            exc.response.status_code,
+            model,
+            exc.response.text[:1500],
+        )
+
         return _fallback_response(message, difficulty)
 
+    except httpx.TimeoutException:
+        logger.exception(
+            "OpenRouter request timed out. Model=%s",
+            model,
+        )
 
-def _fallback_response(message: str, difficulty: str) -> str:
-    msg_lower = message.lower()
-    if any(w in msg_lower for w in ["superposition", "what is quantum"]):
-        return FALLBACK_RESPONSES.get(difficulty, FALLBACK_RESPONSES["beginner"])
-    if any(w in msg_lower for w in ["hadamard", " h gate"]):
-        return "The Hadamard gate creates equal superposition: it maps |0⟩ → ½(|0⟩+|1⟩) and |1⟩ → ½(|0⟩-|1⟩). Think of it as a quantum coin flip that leaves the coin spinning."
-    if "entangle" in msg_lower:
-        return "Quantum entanglement links two qubits so that measuring one instantly determines the state of the other, no matter how far apart they are. It's created by combining a Hadamard gate with a CNOT gate."
-    if "grover" in msg_lower:
-        return "Grover's algorithm searches an unsorted database of N items in O(√N) steps, compared to O(N) classically — a quadratic speedup. It works by amplifying the amplitude of the target state through repeated oracle + diffusion steps."
-    return "That's a great quantum computing question! To get full AI-powered answers, add your OpenRouter API key to the backend .env file. I can explain any quantum concept, gate, or algorithm in depth."
+        return _fallback_response(message, difficulty)
+
+    except httpx.RequestError:
+        logger.exception(
+            "Could not connect to OpenRouter. Model=%s",
+            model,
+        )
+
+        return _fallback_response(message, difficulty)
+
+    except (ValueError, KeyError, IndexError):
+        logger.exception(
+            "Could not parse OpenRouter response. Model=%s",
+            model,
+        )
+
+        return _fallback_response(message, difficulty)
+
+    except Exception:
+        logger.exception(
+            "Unexpected error in AI provider. Model=%s",
+            model,
+        )
+
+        return _fallback_response(message, difficulty)
