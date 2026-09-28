@@ -1,0 +1,9 @@
+# Backend environment and Python
+02_Backend/.env
+02_Backend/.venv/
+**/__pycache__/
+*.py[cod]
+
+# Frontend dependencies
+node_modules/
+01_Frontend/node_modules/
